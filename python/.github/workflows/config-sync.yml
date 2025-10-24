@@ -1,0 +1,84 @@
+name: Config Webhook
+
+on:
+  push:
+    branches: ["**"]             # run on any branch push
+    paths:
+      - "config.yaml"
+      - "Config.yaml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate-and-post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PyYAML & jq
+        run: |
+          pip install pyyaml
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+
+      - name: Validate YAML parses
+        id: validate
+        run: |
+          FILE="config.yaml"
+          [ -f "Config.yaml" ] && FILE="Config.yaml"
+          python - <<'PY'
+          import sys, yaml, pathlib, json
+          p = pathlib.Path("config.yaml")
+          if not p.exists():
+              p = pathlib.Path("Config.yaml")
+          try:
+              with p.open("r", encoding="utf-8") as f:
+                  data = yaml.safe_load(f)
+              print("::set-output name=file::"+str(p))
+              print("YAML OK")
+          except Exception as e:
+              print("YAML invalid:", e)
+              sys.exit(1)
+          PY
+
+      - name: Build payload
+        run: |
+          FILE="config.yaml"; [ -f "Config.yaml" ] && FILE="Config.yaml"
+
+          # Changed files (under this push)
+          CHANGED=$(git diff --name-only "${{ github.event.before }}" "${{ github.sha }}" | tr '\n' ' ')
+
+          # Base JSON
+          cat > payload.json <<EOF
+          {
+            "event": "config_changed",
+            "repo": "${{ github.repository }}",
+            "branch": "${{ github.ref_name }}",
+            "actor": "${{ github.actor }}",
+            "sha": "${{ github.sha }}",
+            "changed_files": "${CHANGED}"
+          }
+          EOF
+
+          # Attach the YAML file contents (as a string)
+          jq --arg cfg "$(cat "$FILE")" '. + {config_yaml: $cfg}' payload.json > tmp.json && mv tmp.json payload.json
+
+      - name: POST to your webhook
+        env:
+          WEBHOOK_URL: ${{ secrets.WEBHOOK_URL }}
+        run: |
+          if [ -z "$WEBHOOK_URL" ]; then
+            echo "Please set WEBHOOK_URL secret to your webhook.site URL"; exit 1
+          fi
+          curl -sS -X POST "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            --data @payload.json
