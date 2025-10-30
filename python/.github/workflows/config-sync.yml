@@ -1,19 +1,19 @@
 name: Config Webhook
 
 on:
-  push:                     # auto-run on push
-    branches: ["main"]
+  push:
+    branches: ["main"]          # change to ["**"] if you want any branch
     paths:
       - "Config.yaml"
       - "config.yaml"
-  workflow_dispatch:        # manual Run workflow button
+  workflow_dispatch:
     inputs:
       file_path:
         description: "Path to YAML to include (optional)"
         required: false
         default: ""
       note:
-        description: "Optional note to include in payload"
+        description: "Optional note included in payload"
         required: false
         default: ""
 
@@ -29,51 +29,51 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Set config file & webhook URL (no secrets)
+      - name: Set up Python (so pip works)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install jq & PyYAML
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          python -m pip install --upgrade pip
+          pip install pyyaml
+
+      - name: Choose config file and URL
         id: cfg
         shell: bash
         run: |
-          # 🔗 Hard-coded webhook URL (no secrets)
           echo "webhook_url=https://webhook.site/d9a7bfe4-7b21-41f3-8dc3-fbc8788a3cb8" >> "$GITHUB_OUTPUT"
 
-          # Pick file: input > Config.yaml > config.yaml
-          INPUT="${{ github.event.inputs.file_path }}"
-          if [ -n "$INPUT" ]; then
-            FILE="$INPUT"
-          elif [ -f "Config.yaml" ]; then
-            FILE="Config.yaml"
-          elif [ -f "config.yaml" ]; then
-            FILE="config.yaml"
-          else
-            echo "No config file found (tried Config.yaml, config.yaml)"; exit 1
+          # Prefer manual input (workflow_dispatch), otherwise pick existing file
+          FILE="${{ inputs.file_path }}"
+          if [ -z "$FILE" ]; then
+            if   [ -f "Config.yaml" ]; then FILE="Config.yaml"
+            elif [ -f "config.yaml" ]; then FILE="config.yaml"
+            else echo "No config file found (Config.yaml/config.yaml)"; exit 1
+            fi
           fi
           echo "file=$FILE" >> "$GITHUB_OUTPUT"
           echo "Using file: $FILE"
 
-      - name: Install PyYAML & jq
-        run: |
-          pip install pyyaml
-          sudo apt-get update -y
-          sudo apt-get install -y jq
-
-      - name: Validate YAML
+      - name: Validate YAML parses
         shell: bash
         run: |
-          FILE="${{ steps.cfg.outputs.file }}"
-          python - <<PY
-import sys, yaml, pathlib
-p = pathlib.Path("${{ steps.cfg.outputs.file }}")
-with p.open("r", encoding="utf-8") as f:
-    yaml.safe_load(f)
-print("YAML OK")
-PY
+          python - <<'PY'
+          import yaml, pathlib, sys
+          p = pathlib.Path("${{ steps.cfg.outputs.file }}")
+          with p.open("r", encoding="utf-8") as f:
+              yaml.safe_load(f)
+          print("YAML OK")
+          PY
 
       - name: Build JSON payload
         shell: bash
         run: |
           FILE="${{ steps.cfg.outputs.file }}"
-          NOTE="${{ github.event.inputs.note || '' }}"
-          # Base payload
+          NOTE="${{ inputs.note }}"
           jq -n \
             --arg event  "${{ github.event_name }}" \
             --arg repo   "${{ github.repository }}" \
@@ -83,13 +83,15 @@ PY
             --arg note   "$NOTE" \
             '{event:$event, repo:$repo, actor:$actor, ref:$ref, sha:$sha, note:$note}' > payload.json
 
-          # Attach YAML file content as a raw string
+          # Attach the YAML file contents as a raw string
           jq -Rs --argfile base payload.json \
-            '. as $cfg | $base + {config_yaml: .}' "$FILE" > payload.withcfg.json
+            '. as $cfg | $base + {data: .}' "$FILE" > payload.withcfg.json
           mv payload.withcfg.json payload.json
-          echo "Payload built:" && cat payload.json
 
-      - name: POST to webhook.site (no secrets)
+          echo "Payload preview:"
+          cat payload.json
+
+      - name: POST to webhook.site
         shell: bash
         run: |
           URL="${{ steps.cfg.outputs.webhook_url }}"
